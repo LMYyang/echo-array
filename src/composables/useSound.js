@@ -6,11 +6,34 @@ import { ref } from 'vue'
 let ctxPool = null
 let lastPlayAt = {}
 let muted = null // ref，懒初始化（_resetForTest 后重读 storage）
+let primed = false // 播报是否已做过一次手势预热
+let voiceCache = null
+
+/** 取一个中文 TTS 音色；voices 是异步加载的，取不到时返回 null 交给浏览器默认 */
+function pickChineseVoice() {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return null
+  try {
+    if (!voiceCache) {
+      const list = window.speechSynthesis.getVoices() || []
+      voiceCache = list.find(v => /^zh/i.test(v.lang)) || list.find(v => v.default) || null
+    }
+    return voiceCache
+  } catch {
+    return null
+  }
+}
+
+if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+  // 音色列表首次是空的，加载完再缓存一次
+  window.speechSynthesis.onvoiceschanged = () => { voiceCache = null }
+}
 
 export function _resetForTest() {
   ctxPool = null
   lastPlayAt = {}
   muted = null
+  primed = false
+  voiceCache = null
 }
 
 const NAMES = [
@@ -77,15 +100,36 @@ export function useSound() {
   /** 文字播报：H5 走 speechSynthesis；环境不支持或静音时静默。新播报打断旧播报 */
   function announce(text) {
     if (muted.value || !text) return
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return
+    const synth = window.speechSynthesis
     try {
-      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-        window.speechSynthesis.cancel()
-        const u = new SpeechSynthesisUtterance(String(text))
-        u.lang = 'zh-CN'
-        u.rate = 1.05
-        window.speechSynthesis.speak(u)
+      const u = new SpeechSynthesisUtterance(String(text))
+      u.lang = 'zh-CN'
+      u.rate = 1.05
+      const voice = pickChineseVoice()
+      if (voice) u.voice = voice
+      // Chrome 的坑：cancel() 后同一 tick 里 speak() 会被静默丢弃，隔一拍再念
+      if (synth.speaking || synth.pending) {
+        synth.cancel()
+        setTimeout(() => { try { if (synth.paused) synth.resume(); synth.speak(u) } catch { /* 静默 */ } }, 80)
+      } else {
+        if (synth.paused) synth.resume()
+        synth.speak(u)
       }
     } catch { /* 播报不可用：静默 */ }
+  }
+
+  /** 首次用户手势时静默「预热」一次，避免部分浏览器把第一次 speak 判为无手势 */
+  function primeSpeech() {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return
+    if (primed) return
+    primed = true
+    try {
+      const u = new SpeechSynthesisUtterance('')
+      u.volume = 0
+      u.lang = 'zh-CN'
+      window.speechSynthesis.speak(u)
+    } catch { /* 静默 */ }
   }
 
   /** 起播背景音乐（循环，随机选一首，选定后保持不变） */
@@ -118,5 +162,5 @@ export function useSound() {
     }
   }
 
-  return { play, announce, muted, toggleMute, startBgm, stopBgm }
+  return { play, announce, primeSpeech, muted, toggleMute, startBgm, stopBgm }
 }

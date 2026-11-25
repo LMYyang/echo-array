@@ -3900,6 +3900,8 @@ var DIFFICULTY = {
     recallAccuracy: 0.5,
     interferenceRate: 0.15,
     peekRate: 0.3,
+    baitRate: 0.2,
+    blindRate: 0.1,
     thinkDelay: [1600, 2400]
   },
   normal: {
@@ -3907,6 +3909,8 @@ var DIFFICULTY = {
     recallAccuracy: 0.75,
     interferenceRate: 0.3,
     peekRate: 0.5,
+    baitRate: 0.4,
+    blindRate: 0.3,
     thinkDelay: [1200, 1900]
   },
   hard: {
@@ -3914,6 +3918,8 @@ var DIFFICULTY = {
     recallAccuracy: 0.92,
     interferenceRate: 0.45,
     peekRate: 0.7,
+    baitRate: 0.65,
+    blindRate: 0.5,
     thinkDelay: [900, 1500]
   }
 };
@@ -3958,6 +3964,22 @@ function rememberedPair(g, seat, params) {
   }
   return null;
 }
+function findClaimable(g, seat, params, down) {
+  const p = g.players[seat];
+  const upByRank = /* @__PURE__ */ new Map();
+  g.array.forEach((s, i) => {
+    if (s && s.faceUp && !isJoker(s.card)) upByRank.set(s.card.rank, i);
+  });
+  if (!upByRank.size || down.length < 2) return null;
+  for (const slot of down) {
+    const mem = p.memory.get(slot);
+    if (!mem || !upByRank.has(mem.rank)) continue;
+    if (g.rng() >= params.recallAccuracy) continue;
+    const second = down.find((s) => s !== slot);
+    return { action: "flip", slots: [slot, second] };
+  }
+  return null;
+}
 function chooseFlip(g, seat, params, down) {
   if (down.length === 0) return null;
   const p = g.players[seat];
@@ -3975,6 +3997,19 @@ function chooseFlip(g, seat, params, down) {
   if (!secondPool.length) return null;
   return { action: "flip", slots: [first, secondPool[0]] };
 }
+function chooseShift(g, seat, params, rng, up, occupied, normalHand) {
+  const visibleRanks = new Set(
+    g.array.filter((s) => s && s.faceUp).map((s) => s.card.rank)
+  );
+  let hand = randomOf(normalHand, rng);
+  if (rng() < params.baitRate) {
+    const bait = normalHand.filter((c) => !visibleRanks.has(c.rank));
+    if (bait.length) hand = randomOf(bait, rng);
+  }
+  const targetSlot = up.length && rng() < Math.max(params.recallAccuracy, 0.4) ? randomOf(up, rng) : randomOf(occupied, rng);
+  const mode = rng() < params.blindRate ? "mute" : "loud";
+  return { action: "replace", handCardId: hand.id, targetSlot, mode };
+}
 function aiChooseAction(g, seat) {
   const p = g.players[seat];
   const params = paramsOf(g);
@@ -3982,31 +4017,24 @@ function aiChooseAction(g, seat) {
   const down = faceDownSlots(g);
   const up = faceUpSlots(g);
   const empty = emptySlots(g);
+  const occupied = occupiedSlots(g);
+  const claim = findClaimable(g, seat, params, down);
+  if (claim) return claim;
   const pair = rememberedPair(g, seat, params);
   if (pair) return { action: "flip", slots: pair };
   const normalHand = p.hand.filter((c) => !isJoker(c));
   const sj = p.hand.find((c) => c.joker === "SJ");
   const bj = p.hand.find((c) => c.joker === "BJ");
-  const canReplace = p.interferenceUsed < g.settings.interferenceLimit && up.length > 0 && empty.length > 0 && normalHand.length > 0;
+  const canReplace = p.interferenceUsed < g.settings.interferenceLimit && occupied.length > 0 && normalHand.length > 0;
   if (rng() < params.interferenceRate) {
-    if (canReplace) {
+    if (canReplace) return chooseShift(g, seat, params, rng, up, occupied, normalHand);
+    if (bj && occupied.length) {
       return {
-        action: "replace",
-        handCardId: randomOf(normalHand, rng).id,
-        targetSlot: randomOf(up, rng),
-        emptySlot: randomOf(empty, rng)
+        action: "swap",
+        handCardId: bj.id,
+        targetSlot: randomOf(occupied, rng),
+        emptySlot: empty.length ? randomOf(empty, rng) : null
       };
-    }
-    if (bj) {
-      const occupied = occupiedSlots(g);
-      if (occupied.length) {
-        return {
-          action: "swap",
-          handCardId: bj.id,
-          targetSlot: randomOf(occupied, rng),
-          emptySlot: empty.length ? randomOf(empty, rng) : null
-        };
-      }
     }
     if (sj && down.length && rng() < params.peekRate) {
       return { action: "peek", handCardId: sj.id, slot: randomOf(down, rng) };
@@ -4015,14 +4043,7 @@ function aiChooseAction(g, seat) {
   const flip = chooseFlip(g, seat, params, down);
   if (flip) return flip;
   if (sj && down.length) return { action: "peek", handCardId: sj.id, slot: randomOf(down, rng) };
-  if (canReplace) {
-    return {
-      action: "replace",
-      handCardId: randomOf(normalHand, rng).id,
-      targetSlot: randomOf(up, rng),
-      emptySlot: randomOf(empty, rng)
-    };
-  }
+  if (canReplace) return chooseShift(g, seat, params, rng, up, occupied, normalHand);
   return { action: "skip" };
 }
 function aiThinkDelay(g) {
@@ -4096,6 +4117,23 @@ function flipCard(g, seat, slot) {
     return { ok: true, joker: true };
   }
   if (g.pending.stage === "idle") {
+    const claimSlot = g.array.findIndex(
+      (c, i) => c && c.faceUp && i !== slot && !isJoker(c.card) && c.card.rank === s.card.rank
+    );
+    if (claimSlot >= 0) {
+      g.pending = { first: claimSlot, second: slot, stage: "revealed", claim: true };
+      g.history.push({
+        seat,
+        action: "flip",
+        slots: [claimSlot, slot],
+        ok: true,
+        claim: true,
+        turnNo: g.turnNo
+      });
+      return { ok: true, claimSlot };
+    }
+  }
+  if (g.pending.stage === "idle") {
     g.pending.first = slot;
     g.pending.stage = "picked";
   } else {
@@ -4157,7 +4195,7 @@ function coverJoker(g) {
   g.pending = { first: null, second: null, stage: "idle" };
   return { ok: true };
 }
-function replaceCard(g, seat, handCardId, targetSlot, emptySlot) {
+function shiftCard(g, seat, handCardId, targetSlot, mode = "loud") {
   if (g.state !== "PLAYING") return { ok: false, reason: "\u975E\u5BF9\u5C40\u9636\u6BB5" };
   if (seat !== g.currentSeat) return { ok: false, reason: "\u6CA1\u8F6E\u5230\u8BE5\u5EA7\u4F4D" };
   const player = g.players[seat];
@@ -4168,27 +4206,32 @@ function replaceCard(g, seat, handCardId, targetSlot, emptySlot) {
   if (handIdx < 0) return { ok: false, reason: "\u624B\u724C\u4E2D\u4E0D\u5B58\u5728\u8BE5\u724C" };
   const card = player.hand[handIdx];
   if (isJoker(card)) return { ok: false, reason: "\u738B\u724C\u8BF7\u4F7F\u7528\u4E13\u5C5E\u884C\u52A8" };
+  if (!Number.isInteger(targetSlot) || targetSlot < 0 || targetSlot >= ARRAY_SIZE) {
+    return { ok: false, reason: "\u69FD\u4F4D\u975E\u6CD5" };
+  }
+  if (mode !== "loud" && mode !== "mute") return { ok: false, reason: "\u6295\u653E\u65B9\u5F0F\u975E\u6CD5" };
   const target = g.array[targetSlot];
-  if (!target || !target.faceUp) return { ok: false, reason: "\u66FF\u6362\u76EE\u6807\u5FC5\u987B\u662F\u5DF2\u7FFB\u5F00\u7684\u724C" };
-  if (emptySlot === targetSlot) return { ok: false, reason: "\u843D\u70B9\u4E0D\u80FD\u4E0E\u76EE\u6807\u540C\u69FD" };
-  if (g.array[emptySlot]) return { ok: false, reason: "\u843D\u70B9\u5FC5\u987B\u662F\u7A7A\u4F4D" };
+  if (!target) return { ok: false, reason: "\u8BE5\u69FD\u4F4D\u4E3A\u7A7A\uFF0C\u65E0\u6CD5\u6539\u5199" };
   const displaced = target.card;
   player.hand.splice(handIdx, 1);
   target.card = card;
-  target.faceUp = true;
-  g.array[emptySlot] = { card: displaced, faceUp: false };
+  target.faceUp = mode === "loud";
+  if (g.drawPile.length > 0) g.drawPile.push(displaced);
+  else g.discard.push(displaced);
   player.interferenceUsed += 1;
   forgetSlot(g, targetSlot);
-  forgetSlot(g, emptySlot);
+  if (mode === "loud") observePublic(g, targetSlot, card);
+  else observePrivate(g, seat, targetSlot, card);
   g.history.push({
     seat,
     action: "replace",
-    slots: [targetSlot, emptySlot],
+    slots: [targetSlot],
     handCardId,
+    mode,
     ok: true,
     turnNo: g.turnNo
   });
-  return { ok: true };
+  return { ok: true, mode, displaced };
 }
 function peekCard(g, seat, handCardId, slot) {
   if (g.state !== "PLAYING") return { ok: false, reason: "\u975E\u5BF9\u5C40\u9636\u6BB5" };
@@ -4639,7 +4682,8 @@ var RoomManager = class {
         return { ok: true };
       }
       case "game.replace": {
-        res = replaceCard(g, me.seat, payload.handCardId, Number(payload.targetSlot), Number(payload.emptySlot));
+        const mode = payload.mode === "mute" ? "mute" : "loud";
+        res = shiftCard(g, me.seat, payload.handCardId, Number(payload.targetSlot), mode);
         if (!res.ok) return { error: { code: "ILLEGAL", message: res.reason } };
         this.afterAction(room);
         return { ok: true };
@@ -4713,7 +4757,7 @@ var RoomManager = class {
           break;
         }
         case "replace":
-          ok = replaceCard(g, seat, choice.handCardId, choice.targetSlot, choice.emptySlot).ok;
+          ok = shiftCard(g, seat, choice.handCardId, choice.targetSlot, choice.mode).ok;
           break;
         case "peek":
           ok = peekCard(g, seat, choice.handCardId, choice.slot).ok;

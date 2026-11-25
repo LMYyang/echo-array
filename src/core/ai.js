@@ -5,19 +5,22 @@
 
 import { isJoker } from './cards.js'
 
-/** 难度参数表：记忆准确率 / 召回准确率 / 干扰频率 / 窥视倾向 / 思考延时区间 */
+/** 难度参数表：记忆/召回/干扰频率/窥视倾向/投毒倾向/暗投倾向/思考延时区间 */
 export const DIFFICULTY = {
   easy: {
     memoryAccuracy: 0.55, recallAccuracy: 0.50,
-    interferenceRate: 0.15, peekRate: 0.30, thinkDelay: [1600, 2400],
+    interferenceRate: 0.15, peekRate: 0.30, baitRate: 0.20, blindRate: 0.10,
+    thinkDelay: [1600, 2400],
   },
   normal: {
     memoryAccuracy: 0.80, recallAccuracy: 0.75,
-    interferenceRate: 0.30, peekRate: 0.50, thinkDelay: [1200, 1900],
+    interferenceRate: 0.30, peekRate: 0.50, baitRate: 0.40, blindRate: 0.30,
+    thinkDelay: [1200, 1900],
   },
   hard: {
     memoryAccuracy: 0.95, recallAccuracy: 0.92,
-    interferenceRate: 0.45, peekRate: 0.70, thinkDelay: [900, 1500],
+    interferenceRate: 0.45, peekRate: 0.70, baitRate: 0.65, blindRate: 0.50,
+    thinkDelay: [900, 1500],
   },
 }
 
@@ -73,6 +76,25 @@ function rememberedPair(g, seat, params) {
   return null
 }
 
+/** 亮牌认领机会：记忆里某个背面槽的点数，正好等于阵中某张正面牌的点数 */
+function findClaimable(g, seat, params, down) {
+  const p = g.players[seat]
+  const upByRank = new Map()
+  g.array.forEach((s, i) => {
+    if (s && s.faceUp && !isJoker(s.card)) upByRank.set(s.card.rank, i)
+  })
+  if (!upByRank.size || down.length < 2) return null
+  for (const slot of down) {
+    const mem = p.memory.get(slot)
+    if (!mem || !upByRank.has(mem.rank)) continue
+    if (g.rng() >= params.recallAccuracy) continue
+    // 第二张只作认领失手时的普通翻牌兜底，必须是背面槽（亮牌槽翻不动）
+    const second = down.find((s) => s !== slot)
+    return { action: 'flip', slots: [slot, second] }
+  }
+  return null
+}
+
 /** 翻牌选槽：优先记忆槽位，其次随机未知槽 */
 function chooseFlip(g, seat, params, down) {
   if (down.length === 0) return null
@@ -93,8 +115,31 @@ function chooseFlip(g, seat, params, down) {
 }
 
 /**
+ * 回声移位决策：选目标槽 / 选手牌 / 选投放方式。
+ * - 目标：优先已翻开的槽（全场都可能记着，改它收益最大），否则随机占用槽；
+ * - 手牌：命中 baitRate 时挑一张"阵中公开牌面里查不到同点数"的牌，制造配不成的假线索（投毒）；
+ * - 投放：blindRate 命中走暗投（盖住牌面，只留私有信息）。
+ */
+function chooseShift(g, seat, params, rng, up, occupied, normalHand) {
+  const visibleRanks = new Set(
+    g.array.filter((s) => s && s.faceUp).map((s) => s.card.rank),
+  )
+  let hand = randomOf(normalHand, rng)
+  if (rng() < params.baitRate) {
+    const bait = normalHand.filter((c) => !visibleRanks.has(c.rank))
+    if (bait.length) hand = randomOf(bait, rng)
+  }
+  // 目标选择：正面牌（对手的确定线索）更值得打掉，命中率跟召回准确率挂钩
+  const targetSlot = up.length && rng() < Math.max(params.recallAccuracy, 0.4)
+    ? randomOf(up, rng)
+    : randomOf(occupied, rng)
+  const mode = rng() < params.blindRate ? 'mute' : 'loud'
+  return { action: 'replace', handCardId: hand.id, targetSlot, mode }
+}
+
+/**
  * AI 决策。返回：
- * { action:'flip', slots:[a,b] } | { action:'replace', handCardId, targetSlot, emptySlot }
+ * { action:'flip', slots:[a,b] } | { action:'replace', handCardId, targetSlot, mode }
  * | { action:'peek', handCardId, slot } | { action:'swap', handCardId, targetSlot, emptySlot? }
  * | { action:'skip' }
  */
@@ -106,8 +151,13 @@ export function aiChooseAction(g, seat) {
   const down = faceDownSlots(g)
   const up = faceUpSlots(g)
   const empty = emptySlots(g)
+  const occupied = occupiedSlots(g)
 
-  // 1. 已知配对优先
+  // 1. 亮牌认领优先（一张已知背面 + 一张亮牌，翻一张就稳收）
+  const claim = findClaimable(g, seat, params, down)
+  if (claim) return claim
+
+  // 2. 已知配对
   const pair = rememberedPair(g, seat, params)
   if (pair) return { action: 'flip', slots: pair }
 
@@ -115,27 +165,17 @@ export function aiChooseAction(g, seat) {
   const sj = p.hand.find((c) => c.joker === 'SJ')
   const bj = p.hand.find((c) => c.joker === 'BJ')
   const canReplace = p.interferenceUsed < g.settings.interferenceLimit &&
-    up.length > 0 && empty.length > 0 && normalHand.length > 0
+    occupied.length > 0 && normalHand.length > 0
 
   // 2. 干扰分支
   if (rng() < params.interferenceRate) {
-    if (canReplace) {
+    if (canReplace) return chooseShift(g, seat, params, rng, up, occupied, normalHand)
+    if (bj && occupied.length) {
       return {
-        action: 'replace',
-        handCardId: randomOf(normalHand, rng).id,
-        targetSlot: randomOf(up, rng),
-        emptySlot: randomOf(empty, rng),
-      }
-    }
-    if (bj) {
-      const occupied = occupiedSlots(g)
-      if (occupied.length) {
-        return {
-          action: 'swap',
-          handCardId: bj.id,
-          targetSlot: randomOf(occupied, rng),
-          emptySlot: empty.length ? randomOf(empty, rng) : null,
-        }
+        action: 'swap',
+        handCardId: bj.id,
+        targetSlot: randomOf(occupied, rng),
+        emptySlot: empty.length ? randomOf(empty, rng) : null,
       }
     }
     if (sj && down.length && rng() < params.peekRate) {
@@ -149,14 +189,7 @@ export function aiChooseAction(g, seat) {
 
   // 4. 兜底：窥视 → 替换 → 跳过
   if (sj && down.length) return { action: 'peek', handCardId: sj.id, slot: randomOf(down, rng) }
-  if (canReplace) {
-    return {
-      action: 'replace',
-      handCardId: randomOf(normalHand, rng).id,
-      targetSlot: randomOf(up, rng),
-      emptySlot: randomOf(empty, rng),
-    }
-  }
+  if (canReplace) return chooseShift(g, seat, params, rng, up, occupied, normalHand)
   return { action: 'skip' }
 }
 

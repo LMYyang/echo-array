@@ -31,6 +31,12 @@ const skinCls = computed(() => skinClass(loadSkin()))
   height: 116rpx;
   border-radius: 12rpx;
   transition: transform 0.15s;
+  animation: handIn 0.3s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+/* 补手牌入场：从下方浮起 */
+@keyframes handIn {
+  0% { transform: translateY(16rpx) scale(0.9); opacity: 0; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
 }
 .hand-card.selected { transform: translateY(-12rpx); }
 .hand-card.disabled { opacity: 0.5; }

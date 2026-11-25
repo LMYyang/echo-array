@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   createGame, startGame, flipCard, resolvePair, coverMismatch, coverJoker,
-  replaceCard, peekCard, swapJoker, skipTurn, endTurn, refillHands, refillArray,
-  isGameOver, viewOf, ARRAY_SIZE, HAND_SIZE,
+  shiftCard, peekCard, swapJoker, skipTurn, endTurn, refillHands, refillArray,
+  isGameOver, viewOf, ARRAY_SIZE, HAND_SIZE, cancelPending,
 } from '../src/core/game.js'
 import { mulberry32, buildDeck, isJoker } from '../src/core/cards.js'
 import { card } from './helpers.js'
@@ -105,20 +105,54 @@ describe('翻牌配对', () => {
   })
 })
 
-describe('普通替换干扰', () => {
-  it('成功替换：手牌正面入阵，原牌背面进空位，干扰次数 +1', () => {
+describe('回声移位干扰（明投 / 暗投）', () => {
+  it('明投：手牌正面入阵，原牌回抽牌堆底，干扰次数 +1', () => {
     const g = makeGame(42, 4)
     const handCard = g.players[0].hand.find((c) => !isJoker(c))
-    g.drawPile.push(g.array[1].card) // 回收被腾空槽位的原牌，维持守恒
-    g.array[1] = null
-    g.array[0].faceUp = true // 原牌翻正面作为替换目标
-    const res = replaceCard(g, 0, handCard.id, 0, 1)
+    const original = g.array[0].card
+    g.array[0].faceUp = true
+    const pileLen = g.drawPile.length
+    const res = shiftCard(g, 0, handCard.id, 0, 'loud')
     expect(res.ok).toBe(true)
+    expect(res.mode).toBe('loud')
+    expect(res.displaced.id).toBe(original.id)
     expect(g.array[0].card.id).toBe(handCard.id)
     expect(g.array[0].faceUp).toBe(true)
-    expect(g.array[1].faceUp).toBe(false)
+    expect(g.drawPile.length).toBe(pileLen + 1)
+    expect(g.drawPile[g.drawPile.length - 1].id).toBe(original.id)
     expect(g.players[0].interferenceUsed).toBe(1)
     expect(conservation(g)).toBe(54)
+  })
+
+  it('暗投：牌面朝下，他人看不到，槽位记忆被清空', () => {
+    const g = makeGame(42, 4)
+    const handCard = g.players[0].hand.find((c) => !isJoker(c))
+    g.array[3].faceUp = true
+    const res = shiftCard(g, 0, handCard.id, 3, 'mute')
+    expect(res.ok).toBe(true)
+    expect(res.mode).toBe('mute')
+    expect(g.array[3].faceUp).toBe(false)
+    expect(g.array[3].card.id).toBe(handCard.id)
+    expect(conservation(g)).toBe(54)
+  })
+
+  it('目标可以是背面牌，任意非空槽都可改写', () => {
+    const g = makeGame(42, 4)
+    const handCard = g.players[0].hand.find((c) => !isJoker(c))
+    setSlot(g, 5, card('heart-Q'), false)
+    const res = shiftCard(g, 0, handCard.id, 5)
+    expect(res.ok).toBe(true)
+    expect(g.array[5].card.id).toBe(handCard.id)
+    expect(conservation(g)).toBe(54)
+  })
+
+  it('空槽、非法槽位、非法投放方式均拒绝', () => {
+    const g = makeGame(42, 4)
+    const handCard = g.players[0].hand.find((c) => !isJoker(c))
+    g.array[1] = null
+    expect(shiftCard(g, 0, handCard.id, 1).ok).toBe(false)
+    expect(shiftCard(g, 0, handCard.id, 0, 'silent').ok).toBe(false)
+    expect(shiftCard(g, 0, handCard.id, 0, 'shout').ok).toBe(false)
   })
 
   it('干扰次数耗尽后拒绝', () => {
@@ -126,22 +160,83 @@ describe('普通替换干扰', () => {
     g.players[0].interferenceUsed = 1
     const handCard = g.players[0].hand[0]
     setSlot(g, 0, card('spade-K'), true)
-    g.array[1] = null
-    expect(replaceCard(g, 0, handCard.id, 0, 1).ok).toBe(false)
+    expect(shiftCard(g, 0, handCard.id, 0).ok).toBe(false)
   })
 
-  it('目标必须正面朝上、落点必须是空位；王牌不可走普通替换', () => {
+  it('王牌不可走回声移位', () => {
+    const g = makeGame(42, 4)
+    g.players[0].hand[0] = card('joker-SJ')
+    expect(shiftCard(g, 0, 'joker-SJ', 0).ok).toBe(false)
+  })
+
+  it('抽牌堆耗尽时被换出的牌进弃牌堆', () => {
     const g = makeGame(42, 4)
     const handCard = g.players[0].hand.find((c) => !isJoker(c))
-    setSlot(g, 0, card('spade-K'), false) // 背面
-    g.array[1] = null
-    expect(replaceCard(g, 0, handCard.id, 0, 1).ok).toBe(false)
+    const original = g.array[0].card
+    // 把抽牌堆整体腾空（牌转入弃牌堆，维持守恒）
+    g.discard.push(...g.drawPile)
+    g.drawPile.length = 0
+    const res = shiftCard(g, 0, handCard.id, 0)
+    expect(res.ok).toBe(true)
+    expect(g.discard[g.discard.length - 1].id).toBe(original.id)
+    expect(conservation(g)).toBe(54)
+  })
+})
 
-    setSlot(g, 0, card('spade-K'), true)
-    expect(replaceCard(g, 0, handCard.id, 0, 0).ok).toBe(false) // 落点与目标同槽
+describe('亮牌认领', () => {
+  it('翻出与亮牌同点数的背面牌，直接配对收走两张', () => {
+    const g = makeGame(42, 4)
+    g.array[0] = { card: card('spade-K'), faceUp: true }
+    g.array[5] = { card: card('heart-K'), faceUp: false }
+    const res = flipCard(g, 0, 5)
+    expect(res.ok).toBe(true)
+    expect(res.claimSlot).toBe(0)
+    expect(g.pending.stage).toBe('revealed')
+    expect(g.pending.claim).toBe(true)
+    const r = resolvePair(g)
+    expect(r.matched).toBe(true)
+    expect(g.array[0]).toBeNull()
+    expect(g.array[5]).toBeNull()
+    expect(g.players[0].collected).toHaveLength(2)
+    expect(conservation(g)).toBe(54)
+  })
 
-    g.players[0].hand[0] = card('joker-SJ')
-    expect(replaceCard(g, 0, 'joker-SJ', 0, 1).ok).toBe(false)
+  it('点数不同不触发认领，仍按普通翻牌继续', () => {
+    const g = makeGame(42, 4)
+    g.array[0] = { card: card('spade-K'), faceUp: true }
+    g.array[5] = { card: card('heart-Q'), faceUp: false }
+    const res = flipCard(g, 0, 5)
+    expect(res.ok).toBe(true)
+    expect(res.claimSlot).toBeUndefined()
+    expect(g.pending.stage).toBe('picked')
+  })
+
+  it('翻到王牌不触发认领', () => {
+    const g = makeGame(42, 4)
+    g.array[0] = { card: card('spade-K'), faceUp: true }
+    g.array[5] = { card: card('joker-SJ'), faceUp: false }
+    const res = flipCard(g, 0, 5)
+    expect(res.joker).toBe(true)
+    expect(res.claimSlot).toBeUndefined()
+  })
+
+  it('多张同点数亮牌时取槽位序号最小的一张', () => {
+    const g = makeGame(42, 4)
+    g.array[2] = { card: card('spade-K'), faceUp: true }
+    g.array[7] = { card: card('club-K'), faceUp: true }
+    g.array[9] = { card: card('heart-K'), faceUp: false }
+    const res = flipCard(g, 0, 9)
+    expect(res.claimSlot).toBe(2)
+    expect(g.pending.first).toBe(2)
+    expect(g.pending.second).toBe(9)
+  })
+
+  it('cancelPending 把已翻开的牌盖回并清空 pending', () => {
+    const g = makeGame(42, 4)
+    flipCard(g, 0, 5)
+    expect(cancelPending(g).ok).toBe(true)
+    expect(g.array[5].faceUp).toBe(false)
+    expect(g.pending.stage).toBe('idle')
   })
 })
 

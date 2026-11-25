@@ -1,5 +1,5 @@
 <template>
-  <view class="seat" :class="{ active, isMe }">
+  <view class="seat" :class="{ active, isMe, bump, compact }">
     <view class="seat-head">
       <text class="seat-label">{{ label }}</text>
       <text v-if="active" class="active-dot">● 行动中</text>
@@ -21,6 +21,9 @@ defineProps({
   interferenceLimit: { type: Number, default: 3 },
   active: { type: Boolean, default: false },
   isMe: { type: Boolean, default: false },
+  bump: { type: Boolean, default: false },
+  // 紧凑模式：对手三家用同一行等分显示，取消最小宽度并允许统计文字折行
+  compact: { type: Boolean, default: false },
 })
 </script>
 
@@ -36,6 +39,17 @@ defineProps({
   min-width: 200rpx;
 }
 .seat.active { border-color: #2fb9c9; background: rgba(47, 185, 201, 0.1); }
+.seat.compact { min-width: 0; padding: 12rpx 14rpx; }
+.seat.compact .seat-label { font-size: 24rpx; }
+.seat.compact .active-dot { font-size: 18rpx; }
+.seat.compact .seat-stats { flex-wrap: wrap; gap: 4rpx 12rpx; font-size: 20rpx; }
+/* 收牌落袋：飞牌到达收集堆时座位条轻微放大 + 边框高亮（与飞牌 0.95s 的落点对齐） */
+.seat.bump { animation: seatBump 0.45s ease-out 0.78s; }
+@keyframes seatBump {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.06); border-color: #2fb9c9; }
+  100% { transform: scale(1); }
+}
 .seat-head { display: flex; align-items: center; justify-content: space-between; gap: 12rpx; }
 .seat-label { font-size: 26rpx; font-weight: 700; color: #eef2ff; }
 .active-dot { font-size: 20rpx; color: #2fb9c9; }

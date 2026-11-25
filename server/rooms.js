@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto'
 import {
   createGame, startGame, flipCard, resolvePair, coverMismatch, coverJoker,
-  replaceCard, peekCard, swapJoker, skipTurn, endTurn, viewOf,
+  shiftCard, peekCard, swapJoker, skipTurn, endTurn, viewOf,
 } from '../src/core/game.js'
 import { aiChooseAction, aiThinkDelay } from '../src/core/ai.js'
 import { DEFAULT_SETTINGS, normalizeSettings } from '../src/core/settings.js'
@@ -336,7 +336,8 @@ export class RoomManager {
         return { ok: true }
       }
       case 'game.replace': {
-        res = replaceCard(g, me.seat, payload.handCardId, Number(payload.targetSlot), Number(payload.emptySlot))
+        const mode = payload.mode === 'mute' ? 'mute' : 'loud'
+        res = shiftCard(g, me.seat, payload.handCardId, Number(payload.targetSlot), mode)
         if (!res.ok) return { error: { code: 'ILLEGAL', message: res.reason } }
         this.afterAction(room)
         return { ok: true }
@@ -409,7 +410,7 @@ export class RoomManager {
           break
         }
         case 'replace':
-          ok = replaceCard(g, seat, choice.handCardId, choice.targetSlot, choice.emptySlot).ok
+          ok = shiftCard(g, seat, choice.handCardId, choice.targetSlot, choice.mode).ok
           break
         case 'peek':
           ok = peekCard(g, seat, choice.handCardId, choice.slot).ok

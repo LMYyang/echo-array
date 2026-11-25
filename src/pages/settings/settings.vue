@@ -26,7 +26,7 @@
       <view class="row">
         <view class="row-main">
           <text class="row-title">干扰上限</text>
-          <text class="row-sub">每人每局普通替换干扰次数（1–5）</text>
+          <text class="row-sub">每人每局回声移位次数（1–5，明投/暗投共用）</text>
         </view>
         <view class="stepper">
           <text class="step-btn" :class="{ disabled: readonly }" @click="stepLimit(-1)">−</text>

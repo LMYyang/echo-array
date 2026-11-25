@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { createGame, startGame } from '../src/core/game.js'
 import { mulberry32 } from '../src/core/cards.js'
+import { card } from './helpers.js'
 import {
   DIFFICULTY, observePublic, observePrivate, forgetSlot, aiChooseAction, aiThinkDelay,
 } from '../src/core/ai.js'
@@ -68,5 +69,34 @@ describe('aiChooseAction 决策输出', () => {
     const d = aiThinkDelay(game)
     expect(d).toBeGreaterThanOrEqual(DIFFICULTY.easy.thinkDelay[0])
     expect(d).toBeLessThanOrEqual(DIFFICULTY.easy.thinkDelay[1])
+  })
+
+  it('记忆命中亮牌点数时优先认领', () => {
+    const game = createGame(() => 0, { difficulty: 'hard' })
+    startGame(game, 4)
+    game.array[0] = { card: card('spade-K'), faceUp: true }
+    game.array[1] = { card: card('heart-K'), faceUp: false }
+    game.players[1].memory.set(1, { rank: 'K', confidence: 1, knownAt: 0 })
+    const choice = aiChooseAction(game, 1)
+    expect(choice.action).toBe('flip')
+    expect(choice.slots[0]).toBe(1)
+  })
+
+  it('回声移位决策带合法投放方式与非空目标', () => {
+    for (const key of ['easy', 'normal', 'hard']) {
+      expect(DIFFICULTY[key].baitRate).toBeGreaterThanOrEqual(0)
+      expect(DIFFICULTY[key].blindRate).toBeGreaterThanOrEqual(0)
+      expect(DIFFICULTY[key].blindRate).toBeLessThanOrEqual(1)
+    }
+    for (let seed = 1; seed <= 30; seed++) {
+      const game = g(seed, 4, 'hard')
+      for (const seat of [1, 2, 3]) {
+        const choice = aiChooseAction(game, seat)
+        if (choice.action !== 'replace') continue
+        expect(['loud', 'mute']).toContain(choice.mode)
+        expect(game.array[choice.targetSlot]).toBeTruthy()
+        return
+      }
+    }
   })
 })

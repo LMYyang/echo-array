@@ -13,7 +13,7 @@ export function useNetGame(net = sharedNet()) {
     opponents: [], settings: null, result: null,
   })
   const fx = reactive({
-    mode: 'flip', selectedHandId: null, targetSlot: null, emptySlot: null,
+    mode: 'flip', selectedHandId: null, targetSlot: null,
     settleShow: false, thinking: false, peekCard: null, lastReason: '', announcements: [],
   })
   const connection = net.status
@@ -106,11 +106,10 @@ export function useNetGame(net = sharedNet()) {
     else fx.mode = 'replace'
     fx.selectedHandId = card.id
     fx.targetSlot = null
-    fx.emptySlot = null
   }
 
   function cancelMode() {
-    fx.mode = 'flip'; fx.selectedHandId = null; fx.targetSlot = null; fx.emptySlot = null
+    fx.mode = 'flip'; fx.selectedHandId = null; fx.targetSlot = null
   }
 
   function onArrayTap(slot) {
@@ -121,16 +120,20 @@ export function useNetGame(net = sharedNet()) {
     if (fx.mode === 'swap') return doSwap(slot)
   }
 
+  /** 替换模式第一步：选任意非空槽作为改写目标 */
   function doReplaceSelect(slot) {
-    const cell = view.array[slot]
-    if (fx.targetSlot === null) {
-      if (!cell || !cell.faceUp) { toast('请选择一张已翻开的牌作为目标'); return }
-      fx.targetSlot = slot
-      return
-    }
-    if (cell) { toast('请选择一个空位作为落点'); return }
-    fx.emptySlot = slot
-    call('game.replace', { handCardId: fx.selectedHandId, targetSlot: fx.targetSlot, emptySlot: fx.emptySlot })
+    if (!view.array[slot]) { toast('该槽位为空，无法改写'); return }
+    fx.targetSlot = slot
+  }
+
+  /** 替换模式第二步：明投 / 暗投 */
+  async function submitShift(mode) {
+    if (fx.mode !== 'replace' || fx.targetSlot === null) return
+    const res = await call('game.replace', {
+      handCardId: fx.selectedHandId, targetSlot: fx.targetSlot, mode,
+    })
+    if (!res.ok) { toast(res.reason); cancelMode(); return }
+    announce(mode === 'mute' ? '暗投：一格回声被盖住了' : '明投：一格回声被改写了')
     cancelMode()
   }
 
@@ -158,7 +161,7 @@ export function useNetGame(net = sharedNet()) {
 
   return {
     view, fx, myTurn, interferenceLeft, labelOf,
-    selectHand, cancelMode, onArrayTap, restart, skipTurnHuman,
+    selectHand, cancelMode, onArrayTap, submitShift, restart, skipTurnHuman,
     connection, roomId, mySeat, leave, sound,
   }
 }

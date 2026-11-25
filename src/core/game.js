@@ -89,6 +89,21 @@ export function flipCard(g, seat, slot) {
     return { ok: true, joker: true }
   }
 
+  // 亮牌认领：阵中若已有同点数的正面牌，翻出同点数背面牌即刻配对
+  // 把亮牌当作"已经翻开的第一张"，本张作第二张，后续直接走 resolvePair 收牌
+  if (g.pending.stage === 'idle') {
+    const claimSlot = g.array.findIndex(
+      (c, i) => c && c.faceUp && i !== slot && !isJoker(c.card) && c.card.rank === s.card.rank,
+    )
+    if (claimSlot >= 0) {
+      g.pending = { first: claimSlot, second: slot, stage: 'revealed', claim: true }
+      g.history.push({
+        seat, action: 'flip', slots: [claimSlot, slot], ok: true, claim: true, turnNo: g.turnNo,
+      })
+      return { ok: true, claimSlot }
+    }
+  }
+
   if (g.pending.stage === 'idle') {
     g.pending.first = slot
     g.pending.stage = 'picked'
@@ -96,6 +111,16 @@ export function flipCard(g, seat, slot) {
     g.pending.second = slot
     g.pending.stage = 'revealed'
   }
+  return { ok: true }
+}
+
+/** 撤销本回合已翻开的牌（AI 只翻到一张、又凑不到第二张时兜底，避免留下脏 pending） */
+export function cancelPending(g) {
+  if (g.pending.stage === 'idle') return { ok: false, reason: '无可撤销的翻牌' }
+  for (const i of [g.pending.first, g.pending.second]) {
+    if (i != null && g.array[i]) g.array[i].faceUp = false
+  }
+  g.pending = { first: null, second: null, stage: 'idle' }
   return { ok: true }
 }
 
@@ -158,8 +183,13 @@ export function coverJoker(g) {
   return { ok: true }
 }
 
-/** 行动 B：普通替换干扰。handCardId=手牌普通牌；targetSlot=正面目标；emptySlot=落点空位 */
-export function replaceCard(g, seat, handCardId, targetSlot, emptySlot) {
+/**
+ * 行动 B：回声移位（手牌干扰）。
+ * 打出一张普通手牌 H 进入阵中任意非空槽 T；T 的原牌 A 退回抽牌堆底（牌堆空则进弃牌堆）。
+ * mode：'loud' 明投（H 正面朝上，全场可见）/ 'mute' 暗投（H 背面朝下，仅投放者知道内容）。
+ * 不再要求空位落点——干扰从"替换"变为"改写记忆地图"。
+ */
+export function shiftCard(g, seat, handCardId, targetSlot, mode = 'loud') {
   if (g.state !== 'PLAYING') return { ok: false, reason: '非对局阶段' }
   if (seat !== g.currentSeat) return { ok: false, reason: '没轮到该座位' }
   const player = g.players[seat]
@@ -170,25 +200,32 @@ export function replaceCard(g, seat, handCardId, targetSlot, emptySlot) {
   if (handIdx < 0) return { ok: false, reason: '手牌中不存在该牌' }
   const card = player.hand[handIdx]
   if (isJoker(card)) return { ok: false, reason: '王牌请使用专属行动' }
+  if (!Number.isInteger(targetSlot) || targetSlot < 0 || targetSlot >= ARRAY_SIZE) {
+    return { ok: false, reason: '槽位非法' }
+  }
+  if (mode !== 'loud' && mode !== 'mute') return { ok: false, reason: '投放方式非法' }
 
   const target = g.array[targetSlot]
-  if (!target || !target.faceUp) return { ok: false, reason: '替换目标必须是已翻开的牌' }
-  if (emptySlot === targetSlot) return { ok: false, reason: '落点不能与目标同槽' }
-  if (g.array[emptySlot]) return { ok: false, reason: '落点必须是空位' }
+  if (!target) return { ok: false, reason: '该槽位为空，无法改写' }
 
   const displaced = target.card
   player.hand.splice(handIdx, 1)
   target.card = card
-  target.faceUp = true
-  g.array[emptySlot] = { card: displaced, faceUp: false }
+  target.faceUp = mode === 'loud'
+  // 被换出的牌回抽牌堆底，之后补牌时以未知位置重入阵面；牌堆耗尽则进弃牌堆
+  if (g.drawPile.length > 0) g.drawPile.push(displaced)
+  else g.discard.push(displaced)
   player.interferenceUsed += 1
 
   forgetSlot(g, targetSlot)
-  forgetSlot(g, emptySlot)
+  // 明投是公开亮牌，所有 AI 记一条；暗投只有投放者自己知道
+  if (mode === 'loud') observePublic(g, targetSlot, card)
+  else observePrivate(g, seat, targetSlot, card)
+
   g.history.push({
-    seat, action: 'replace', slots: [targetSlot, emptySlot], handCardId, ok: true, turnNo: g.turnNo,
+    seat, action: 'replace', slots: [targetSlot], handCardId, mode, ok: true, turnNo: g.turnNo,
   })
-  return { ok: true }
+  return { ok: true, mode, displaced }
 }
 
 /** 行动 C-1：小王窥视。查看背面槽位，仅本人记忆入账，小王进弃牌堆 */
