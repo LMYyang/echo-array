@@ -1,0 +1,33 @@
+{
+  "pages": [
+    {
+      "path": "pages/index/index",
+      "style": { "navigationBarTitleText": "回声阵", "navigationStyle": "custom" }
+    },
+    {
+      "path": "pages/game/game",
+      "style": { "navigationBarTitleText": "回声阵", "navigationStyle": "custom", "disableScroll": true }
+    },
+    {
+      "path": "pages/settings/settings",
+      "style": { "navigationBarTitleText": "游戏设置", "navigationStyle": "custom" }
+    },
+    {
+      "path": "pages/lobby/lobby",
+      "style": { "navigationBarTitleText": "联网对战", "navigationStyle": "custom" }
+    },
+    {
+      "path": "pages/room/room",
+      "style": { "navigationBarTitleText": "房间", "navigationStyle": "custom" }
+    },
+    {
+      "path": "pages/roomlist/roomlist",
+      "style": { "navigationBarTitleText": "房间列表", "navigationStyle": "custom" }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "white",
+    "navigationBarBackgroundColor": "#101728",
+    "backgroundColor": "#101728"
+  }
+}
