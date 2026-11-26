@@ -178,6 +178,14 @@ export function useGame() {
           afterAction()
         }
       }, 900)
+      return
+    }
+
+    // 翻开第一张后阵中已没有第二张可翻：盖回并结束本回合，避免卡在「翻牌比对中」
+    if (g.pending.stage === 'picked'
+      && !g.array.some((s, i) => s && !s.faceUp && i !== slot)) {
+      announce('阵中已无第二张可翻，盖回')
+      setTimeout(() => { cancelPending(g); syncView(); afterAction() }, 700)
     }
   }
 

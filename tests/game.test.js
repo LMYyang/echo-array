@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   createGame, startGame, flipCard, resolvePair, coverMismatch, coverJoker,
   shiftCard, peekCard, swapJoker, skipTurn, endTurn, refillHands, refillArray,
-  isGameOver, viewOf, ARRAY_SIZE, HAND_SIZE, cancelPending,
+  isGameOver, viewOf, ARRAY_SIZE, HAND_SIZE, cancelPending, hasPairInArray,
 } from '../src/core/game.js'
 import { mulberry32, buildDeck, isJoker } from '../src/core/cards.js'
 import { card } from './helpers.js'
@@ -309,6 +309,57 @@ describe('补给与结束', () => {
     expect(g.state).toBe('SETTLE')
     expect(g.result).toBeTruthy()
     expect(g.result.ranks).toHaveLength(3)
+  })
+
+  it('抽牌堆耗尽 + 阵中全是王牌 → 结束（王牌永远收不走）', () => {
+    const g = makeGame(42, 2)
+    g.array.forEach((_, i) => { g.array[i] = null })
+    g.array[0] = { card: card('joker-SJ'), faceUp: false }
+    g.array[5] = { card: card('joker-BJ'), faceUp: true }
+    g.drawPile = []
+    expect(hasPairInArray(g)).toBe(false)
+    expect(isGameOver(g)).toBe(true)
+    endTurn(g)
+    expect(g.state).toBe('SETTLE')
+  })
+
+  it('抽牌堆耗尽 + 阵中残牌互不同点数 → 结束（无对可成）', () => {
+    const g = makeGame(42, 2)
+    g.array.forEach((_, i) => { g.array[i] = null })
+    g.array[2] = { card: card('spade-A'), faceUp: false }
+    g.array[7] = { card: card('heart-K'), faceUp: false }
+    g.drawPile = []
+    expect(isGameOver(g)).toBe(true)
+  })
+
+  it('抽牌堆耗尽但阵中还有同点数两张 → 继续（不能提前结束）', () => {
+    const g = makeGame(42, 2)
+    g.array.forEach((_, i) => { g.array[i] = null })
+    g.array[2] = { card: card('spade-A'), faceUp: false }
+    g.array[9] = { card: card('club-A'), faceUp: false }
+    g.drawPile = []
+    expect(hasPairInArray(g)).toBe(true)
+    expect(isGameOver(g)).toBe(false)
+    endTurn(g)
+    expect(g.state).toBe('PLAYING')
+  })
+
+  it('抽牌堆还有牌时即使阵中无对也不算结束（补牌还能继续）', () => {
+    const g = makeGame(42, 2)
+    g.array.forEach((_, i) => { g.array[i] = null })
+    g.array[0] = { card: card('joker-SJ'), faceUp: false }
+    g.drawPile = [card('spade-A')]
+    expect(isGameOver(g)).toBe(false)
+  })
+
+  it('回合结束时把未配对的单张翻牌盖回，不留永久亮牌', () => {
+    const g = makeGame(42, 3)
+    expect(flipCard(g, 0, 4).ok).toBe(true)
+    expect(g.pending.stage).toBe('picked')
+    expect(g.array[4].faceUp).toBe(true)
+    endTurn(g)
+    expect(g.array[4].faceUp).toBe(false)
+    expect(g.pending.stage).toBe('idle')
   })
 
   it('skipTurn 记录历史并轮转', () => {

@@ -8,6 +8,18 @@ let lastPlayAt = {}
 let muted = null // ref，懒初始化（_resetForTest 后重读 storage）
 let primed = false // 播报是否已做过一次手势预热
 let voiceCache = null
+// 播报队列状态：一次只念一句，念完再念下一句（不 cancel 正在念的句子）
+let voiceQueue = []
+let speaking = false
+let currentText = '' // 正在念的句子，用于同一句连播去重
+let retryInfo = null // { text, attempt }：被看门狗重排的句子，带上重试次数，避免无限重试
+// 必须一直握着当前这句的引用：Chrome/Edge 会在 utterance 被回收后
+// 悄悄掐掉语音，且不再触发 onend（表现就是「播报没声了」）
+let liveUtterance = null
+let idleTimer = null
+let idleSince = 0
+
+const MAX_VOICE_QUEUE = 2
 
 /** 取一个中文 TTS 音色；voices 是异步加载的，取不到时返回 null 交给浏览器默认 */
 function pickChineseVoice() {
@@ -15,7 +27,7 @@ function pickChineseVoice() {
   try {
     if (!voiceCache) {
       const list = window.speechSynthesis.getVoices() || []
-      voiceCache = list.find(v => /^zh/i.test(v.lang)) || list.find(v => v.default) || null
+      voiceCache = list.find(v => /^zh/i.test(v.lang)) || null
     }
     return voiceCache
   } catch {
@@ -34,6 +46,119 @@ export function _resetForTest() {
   muted = null
   primed = false
   voiceCache = null
+  voiceQueue = []
+  speaking = false
+  currentText = ''
+  retryInfo = null
+  liveUtterance = null
+  if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
+  idleSince = 0
+}
+
+/** 浏览器 TTS 是否可用 */
+function speechAvailable() {
+  return typeof window !== 'undefined' && 'speechSynthesis' in window && !!window.speechSynthesis
+}
+
+/** 清空播报队列并掐断当前播报（静音 / 离开页面时用） */
+function stopSpeech() {
+  voiceQueue = []
+  if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
+  idleSince = 0
+  speaking = false
+  currentText = ''
+  retryInfo = null
+  liveUtterance = null
+  try {
+    if (speechAvailable()) {
+      window.speechSynthesis.cancel()
+      if (window.speechSynthesis.paused) window.speechSynthesis.resume()
+    }
+  } catch { /* 静默 */ }
+}
+
+/**
+ * 念一句。引擎迟迟不开口（Chrome/Edge 偶发吞句）时，800ms 后重试一次；
+ * onend / onerror 收尾后再念队列里的下一句。
+ */
+function speakOne(text, attempt) {
+  const synth = window.speechSynthesis
+  speaking = true
+  currentText = text
+  let settled = false
+  let started = false
+  let voice = null
+  let hang = null
+  try { voice = pickChineseVoice() } catch { voice = null }
+
+  const finish = () => {
+    if (settled) return
+    settled = true
+    clearTimeout(guard)
+    clearTimeout(hang)
+    speaking = false
+    currentText = ''
+    liveUtterance = null
+    setTimeout(pumpSpeech, 140)
+  }
+
+  const guard = setTimeout(() => {
+    if (settled || started) return // 已经开口了，等它自己念完
+    settled = true
+    speaking = false
+    currentText = ''
+    liveUtterance = null
+    try { synth.cancel() } catch { /* 静默 */ }
+    if (attempt < 2) {
+      retryInfo = { text, attempt: attempt + 1 }
+      voiceQueue.unshift(text)
+    }
+    setTimeout(pumpSpeech, 200)
+  }, 800)
+
+  // 兜底：个别浏览器会「念完不触发 onend」，卡住整条播报链路
+  hang = setTimeout(() => {
+    if (settled) return
+    if (synth.speaking) { try { synth.cancel() } catch { /* 静默 */ } }
+    finish()
+  }, Math.max(8000, 2000 + text.length * 400))
+
+  try {
+    const u = new SpeechSynthesisUtterance(text)
+    liveUtterance = u // 关键：握紧引用，否则 Edge 会中途丢声音且不触发 onend
+    u.lang = 'zh-CN'
+    u.rate = 1.05
+    if (voice) u.voice = voice
+    u.onstart = () => { started = true }
+    u.onend = finish
+    u.onerror = finish
+    if (synth.paused) synth.resume()
+    synth.speak(u)
+  } catch { finish() }
+}
+
+/** 队列泵：引擎空闲才开口；被别人占着就等，等太久（卡死）才强推一次 */
+function pumpSpeech() {
+  if (speaking || !voiceQueue.length || !speechAvailable()) return
+  if (muted && muted.value) return
+  const synth = window.speechSynthesis
+  if (synth.speaking || synth.pending) {
+    if (!idleSince) idleSince = Date.now()
+    if (Date.now() - idleSince > 1600) {
+      // 引擎卡在 speaking 状态不动了：清一次，避免整个播报链路哑掉
+      try { synth.cancel() } catch { /* 静默 */ }
+      try { if (synth.paused) synth.resume() } catch { /* 静默 */ }
+      idleSince = Date.now()
+    }
+    if (idleTimer) clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => { idleTimer = null; pumpSpeech() }, 100)
+    return
+  }
+  idleSince = 0
+  const next = voiceQueue.shift()
+  const att = retryInfo && retryInfo.text === next ? retryInfo.attempt : 1
+  retryInfo = null
+  speakOne(next, att)
 }
 
 const NAMES = [
@@ -97,38 +222,39 @@ export function useSound() {
     } catch { /* 音频不可用：静默 */ }
   }
 
-  /** 文字播报：H5 走 speechSynthesis；环境不支持或静音时静默。新播报打断旧播报 */
+  /**
+   * 文字播报：H5 走 speechSynthesis；环境不支持或静音时静默。
+   * 进队列排队念（最多积压 2 句），不再 cancel 正在念的句子——
+   * 旧实现「cancel + 80ms 后 speak」在 Chrome / Edge 上会互相打断甚至整条链路哑掉。
+   */
   function announce(text) {
     if (muted.value || !text) return
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return
-    const synth = window.speechSynthesis
-    try {
-      const u = new SpeechSynthesisUtterance(String(text))
-      u.lang = 'zh-CN'
-      u.rate = 1.05
-      const voice = pickChineseVoice()
-      if (voice) u.voice = voice
-      // Chrome 的坑：cancel() 后同一 tick 里 speak() 会被静默丢弃，隔一拍再念
-      if (synth.speaking || synth.pending) {
-        synth.cancel()
-        setTimeout(() => { try { if (synth.paused) synth.resume(); synth.speak(u) } catch { /* 静默 */ } }, 80)
-      } else {
-        if (synth.paused) synth.resume()
-        synth.speak(u)
-      }
-    } catch { /* 播报不可用：静默 */ }
+    if (!speechAvailable()) return
+    const line = String(text)
+    // 同一句去重：正在念的、队列尾部的都不再重复入队
+    if (line === currentText || voiceQueue[voiceQueue.length - 1] === line) return
+    if (voiceQueue.length >= MAX_VOICE_QUEUE) voiceQueue.shift()
+    voiceQueue.push(line)
+    pumpSpeech()
   }
 
-  /** 首次用户手势时静默「预热」一次，避免部分浏览器把第一次 speak 判为无手势 */
+  /**
+   * 首次用户手势时静默「预热」一次，避免部分浏览器把第一次 speak 判为无手势。
+   * 用全角空格而不是空串：空串会被部分引擎直接忽略，起不到解锁作用。
+   */
   function primeSpeech() {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return
-    if (primed) return
+    if (!speechAvailable() || primed) return
     primed = true
     try {
-      const u = new SpeechSynthesisUtterance('')
+      const synth = window.speechSynthesis
+      const u = new SpeechSynthesisUtterance('　')
+      liveUtterance = u
       u.volume = 0
       u.lang = 'zh-CN'
-      window.speechSynthesis.speak(u)
+      u.onend = () => { setTimeout(pumpSpeech, 120) }
+      u.onerror = () => { setTimeout(pumpSpeech, 120) }
+      if (synth.paused) synth.resume()
+      synth.speak(u)
     } catch { /* 静默 */ }
   }
 
@@ -158,9 +284,9 @@ export function useSound() {
     try { uni.setStorageSync('echoarray_muted', muted.value) } catch { /* 存储不可用 */ }
     if (muted.value) {
       stopBgm()
-      try { if (typeof window !== 'undefined' && 'speechSynthesis' in window) window.speechSynthesis.cancel() } catch { /* 静默 */ }
+      stopSpeech()
     }
   }
 
-  return { play, announce, primeSpeech, muted, toggleMute, startBgm, stopBgm }
+  return { play, announce, primeSpeech, muted, toggleMute, startBgm, stopBgm, stopSpeech }
 }

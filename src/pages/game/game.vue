@@ -239,7 +239,7 @@ onMounted(() => {
     document.addEventListener('pointerdown', prime)
   }
 })
-onUnmounted(() => { sound.stopBgm() })
+onUnmounted(() => { sound.stopBgm(); sound.stopSpeech?.() })
 
 function goHome() {
   if (mode.value === 'net') {

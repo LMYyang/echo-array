@@ -59,12 +59,19 @@ export function forgetSlot(g, slot) {
   for (const p of g.players) p.memory.delete(slot)
 }
 
-/** 记忆中两张同点数背面槽位（按召回准确率抽检） */
+/** 记忆里这一格是王牌：翻它只会立刻收场，白白浪费一个回合 */
+function knownJoker(p, slot) {
+  const mem = p.memory.get(slot)
+  return !!mem && (mem.rank === 'SJ' || mem.rank === 'BJ')
+}
+
+/** 记忆中两张同点数背面槽位（按召回准确率抽检）；王牌不计 */
 function rememberedPair(g, seat, params) {
   const p = g.players[seat]
   const byRank = new Map()
   for (const [slot, mem] of p.memory) {
     if (!g.array[slot] || g.array[slot].faceUp) continue
+    if (mem.rank === 'SJ' || mem.rank === 'BJ') continue
     if (g.rng() < params.recallAccuracy) {
       if (!byRank.has(mem.rank)) byRank.set(mem.rank, [])
       byRank.get(mem.rank).push(Number(slot))
@@ -83,7 +90,7 @@ function findClaimable(g, seat, params, down) {
   g.array.forEach((s, i) => {
     if (s && s.faceUp && !isJoker(s.card)) upByRank.set(s.card.rank, i)
   })
-  if (!upByRank.size || down.length < 2) return null
+  if (!upByRank.size || down.length < 1) return null
   for (const slot of down) {
     const mem = p.memory.get(slot)
     if (!mem || !upByRank.has(mem.rank)) continue
@@ -95,21 +102,33 @@ function findClaimable(g, seat, params, down) {
   return null
 }
 
-/** 翻牌选槽：优先记忆槽位，其次随机未知槽 */
+/**
+ * 翻牌选槽：
+ * 1. 记忆里明确是王牌的槽不翻（翻了也配不成对，只是白白结束回合）；
+ * 2. 第一张优先"记得且召回成功"的槽，其次翻完全没见过的槽；
+ * 3. 第二张优先翻没见过的槽，保证每回合都能拿到新信息；
+ *    否则 AI 会反复翻同样两格，记忆永远长不起来，局面看起来像卡死。
+ */
 function chooseFlip(g, seat, params, down) {
-  if (down.length === 0) return null
   const p = g.players[seat]
+  const candidates = down.filter((slot) => !knownJoker(p, slot))
+  if (!candidates.length) return null
+
+  const remembered = []
+  const fresh = []
   const recalled = []
-  const unknown = []
-  for (const slot of down) {
+  for (const slot of candidates) {
     const mem = p.memory.get(slot)
-    if (mem && g.rng() < params.recallAccuracy) recalled.push(slot)
-    else unknown.push(slot)
+    if (!mem) fresh.push(slot)
+    else {
+      remembered.push(slot)
+      if (g.rng() < params.recallAccuracy) recalled.push(slot)
+    }
   }
-  const first = recalled[0] ?? unknown[0] ?? down[0]
-  let secondPool = recalled.filter((s) => s !== first)
-  if (!secondPool.length) secondPool = unknown.filter((s) => s !== first)
-  if (!secondPool.length) secondPool = down.filter((s) => s !== first)
+  const first = recalled[0] ?? fresh[0] ?? remembered[0] ?? candidates[0]
+  let secondPool = fresh.filter((s) => s !== first)
+  if (!secondPool.length) secondPool = remembered.filter((s) => s !== first)
+  if (!secondPool.length) secondPool = candidates.filter((s) => s !== first)
   if (!secondPool.length) return null
   return { action: 'flip', slots: [first, secondPool[0]] }
 }

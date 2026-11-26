@@ -311,13 +311,66 @@ export function refillArray(g, batch = REFILL_BATCH) {
   }
 }
 
-/** 结束判定：阵中全空且抽牌堆耗尽 */
-export function isGameOver(g) {
-  return g.array.every((s) => s === null) && g.drawPile.length === 0
+/**
+ * 阵中是否还存在「可收走」的成对牌：同点数 ≥2 张，且至少有一张是背面。
+ * 王牌不可配对；两张都正面朝上的同点数牌也配不起来（正面牌翻不动，只能被认领）。
+ */
+export function hasPairInArray(g) {
+  const counts = new Map() // rank -> { all, down }
+  for (const s of g.array) {
+    if (!s || isJoker(s.card)) continue
+    const rec = counts.get(s.card.rank) || { all: 0, down: 0 }
+    rec.all += 1
+    if (!s.faceUp) rec.down += 1
+    counts.set(s.card.rank, rec)
+  }
+  for (const rec of counts.values()) {
+    if (rec.all >= 2 && rec.down >= 1) return true
+  }
+  return false
 }
 
-/** 回合结束：补给 → 结束判定 → 轮转下一座位 */
+/**
+ * 是否还有人能用回声移位改写阵面（手牌普通牌 + 还剩干扰次数 + 阵中有槽）。
+ * 阵面无对可成时，只有改写还能造出新的配对，所以这是「还能不能继续」的最后一道判据。
+ */
+export function canStillShift(g) {
+  const occupied = g.array.filter(Boolean)
+  if (occupied.length < 2) return false
+  // 只有「手牌点数在阵中已经有一张」时，替换才可能凑出新的成对
+  const ranksInArray = new Set(occupied.filter((s) => !isJoker(s.card)).map((s) => s.card.rank))
+  if (!ranksInArray.size) return false
+  return g.players.some(
+    (p) => p.interferenceUsed < g.settings.interferenceLimit
+      && p.hand.some((c) => !isJoker(c) && ranksInArray.has(c.rank)),
+  )
+}
+
+/**
+ * 结束判定：
+ * 1. 阵面全空且抽牌堆耗尽；
+ * 2. 或阵中已无可成对的普通牌，且补牌进不来（阵满/牌堆空），又没人再能改写阵面。
+ * 只判「阵中全空」会让对局永久空转：王牌、孤牌收不走，阵面卡在无对状态时谁也动不了。
+ */
+export function isGameOver(g) {
+  const arrayEmpty = g.array.every((s) => s === null)
+  if (arrayEmpty) return g.drawPile.length === 0
+  if (hasPairInArray(g)) return false
+  // 还有空位 + 还有牌：下一回合补牌会带进新牌，仍可能凑出新对
+  if (g.drawPile.length > 0 && g.array.some((s) => s === null)) return false
+  return !canStillShift(g)
+}
+
+/** 回合结束：结清未完成的翻牌 → 补给 → 结束判定 → 轮转下一座位 */
 export function endTurn(g) {
+  // 回合内只翻了一张（阵中不足两张背面牌 / 主动跳过）时，把翻开的牌盖回，
+  // 避免留下一张永远收不走的正面牌
+  if (g.pending.stage !== 'idle') {
+    for (const i of [g.pending.first, g.pending.second]) {
+      if (i != null && g.array[i]) g.array[i].faceUp = false
+    }
+    g.pending = { first: null, second: null, stage: 'idle' }
+  }
   refillHands(g)
   refillArray(g, REFILL_BATCH)
 

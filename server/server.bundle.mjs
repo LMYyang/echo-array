@@ -3949,11 +3949,16 @@ function observePrivate(g, seat, slot, card) {
 function forgetSlot(g, slot) {
   for (const p of g.players) p.memory.delete(slot);
 }
+function knownJoker(p, slot) {
+  const mem = p.memory.get(slot);
+  return !!mem && (mem.rank === "SJ" || mem.rank === "BJ");
+}
 function rememberedPair(g, seat, params) {
   const p = g.players[seat];
   const byRank = /* @__PURE__ */ new Map();
   for (const [slot, mem] of p.memory) {
     if (!g.array[slot] || g.array[slot].faceUp) continue;
+    if (mem.rank === "SJ" || mem.rank === "BJ") continue;
     if (g.rng() < params.recallAccuracy) {
       if (!byRank.has(mem.rank)) byRank.set(mem.rank, []);
       byRank.get(mem.rank).push(Number(slot));
@@ -3970,7 +3975,7 @@ function findClaimable(g, seat, params, down) {
   g.array.forEach((s, i) => {
     if (s && s.faceUp && !isJoker(s.card)) upByRank.set(s.card.rank, i);
   });
-  if (!upByRank.size || down.length < 2) return null;
+  if (!upByRank.size || down.length < 1) return null;
   for (const slot of down) {
     const mem = p.memory.get(slot);
     if (!mem || !upByRank.has(mem.rank)) continue;
@@ -3981,19 +3986,24 @@ function findClaimable(g, seat, params, down) {
   return null;
 }
 function chooseFlip(g, seat, params, down) {
-  if (down.length === 0) return null;
   const p = g.players[seat];
+  const candidates = down.filter((slot) => !knownJoker(p, slot));
+  if (!candidates.length) return null;
+  const remembered = [];
+  const fresh = [];
   const recalled = [];
-  const unknown = [];
-  for (const slot of down) {
+  for (const slot of candidates) {
     const mem = p.memory.get(slot);
-    if (mem && g.rng() < params.recallAccuracy) recalled.push(slot);
-    else unknown.push(slot);
+    if (!mem) fresh.push(slot);
+    else {
+      remembered.push(slot);
+      if (g.rng() < params.recallAccuracy) recalled.push(slot);
+    }
   }
-  const first = recalled[0] ?? unknown[0] ?? down[0];
-  let secondPool = recalled.filter((s) => s !== first);
-  if (!secondPool.length) secondPool = unknown.filter((s) => s !== first);
-  if (!secondPool.length) secondPool = down.filter((s) => s !== first);
+  const first = recalled[0] ?? fresh[0] ?? remembered[0] ?? candidates[0];
+  let secondPool = fresh.filter((s) => s !== first);
+  if (!secondPool.length) secondPool = remembered.filter((s) => s !== first);
+  if (!secondPool.length) secondPool = candidates.filter((s) => s !== first);
   if (!secondPool.length) return null;
   return { action: "flip", slots: [first, secondPool[0]] };
 }
@@ -4303,10 +4313,43 @@ function refillArray(g, batch = REFILL_BATCH) {
     }
   }
 }
+function hasPairInArray(g) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const s of g.array) {
+    if (!s || isJoker(s.card)) continue;
+    const rec = counts.get(s.card.rank) || { all: 0, down: 0 };
+    rec.all += 1;
+    if (!s.faceUp) rec.down += 1;
+    counts.set(s.card.rank, rec);
+  }
+  for (const rec of counts.values()) {
+    if (rec.all >= 2 && rec.down >= 1) return true;
+  }
+  return false;
+}
+function canStillShift(g) {
+  const occupied = g.array.filter(Boolean);
+  if (occupied.length < 2) return false;
+  const ranksInArray = new Set(occupied.filter((s) => !isJoker(s.card)).map((s) => s.card.rank));
+  if (!ranksInArray.size) return false;
+  return g.players.some(
+    (p) => p.interferenceUsed < g.settings.interferenceLimit && p.hand.some((c) => !isJoker(c) && ranksInArray.has(c.rank))
+  );
+}
 function isGameOver(g) {
-  return g.array.every((s) => s === null) && g.drawPile.length === 0;
+  const arrayEmpty = g.array.every((s) => s === null);
+  if (arrayEmpty) return g.drawPile.length === 0;
+  if (hasPairInArray(g)) return false;
+  if (g.drawPile.length > 0 && g.array.some((s) => s === null)) return false;
+  return !canStillShift(g);
 }
 function endTurn(g) {
+  if (g.pending.stage !== "idle") {
+    for (const i of [g.pending.first, g.pending.second]) {
+      if (i != null && g.array[i]) g.array[i].faceUp = false;
+    }
+    g.pending = { first: null, second: null, stage: "idle" };
+  }
   refillHands(g);
   refillArray(g, REFILL_BATCH);
   if (isGameOver(g)) {
